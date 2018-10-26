@@ -27,19 +27,16 @@ import re
 import lsst.log
 import lsst.utils as utils
 import lsst.afw.image.utils as afwImageUtils
-import lsst.afw.geom as afwGeom
-import lsst.geom as geom
 import lsst.afw.image as afwImage
 from lsst.afw.fits import readMetadata
-from lsst.obs.base import CameraMapper, MakeRawVisitInfoViaObsInfo, bboxFromIraf
+from lsst.obs.base import CameraMapper, MakeRawVisitInfoViaObsInfo
 import lsst.obs.base.yamlCamera as yamlCamera
 import lsst.daf.persistence as dafPersist
-import lsst.afw.cameraGeom as cameraGeom
 
 from .filters import getFilterDefinitions
+from .assembly import attachRawWcsFromBoresight, fixAmpGeometry, assembleUntrimmedCcd
 
 __all__ = ["LsstCamMapper", "LsstCamMakeRawVisitInfo"]
-
 
 
 class LsstCamMakeRawVisitInfo(MakeRawVisitInfoViaObsInfo):
@@ -66,12 +63,6 @@ def assemble_raw(dataId, componentInfo, cls):
     exposure : `lsst.afw.image.exposure.exposure`
         The assembled exposure.
     """
-    from lsst.ip.isr import AssembleCcdTask
-
-    config = AssembleCcdTask.ConfigClass()
-    config.doTrim = False
-
-    assembleTask = AssembleCcdTask(config=config)
 
     ampExps = componentInfo['raw_amp'].obj
     if len(ampExps) == 0:
@@ -83,126 +74,34 @@ def assemble_raw(dataId, componentInfo, cls):
     #
     logger = lsst.log.Log.getLogger("LsstCamMapper")
     warned = False
-    for i, (amp, ampExp) in enumerate(zip(ccd, ampExps)):
-        ampMd = ampExp.getMetadata().toDict()
 
-        if amp.getRawBBox() != ampExp.getBBox():  # Oh dear. cameraGeom is wrong -- probably overscan
-            if amp.getRawDataBBox().getDimensions() != amp.getBBox().getDimensions():
-                raise RuntimeError("Active area is the wrong size: %s v. %s" %
-                                   (amp.getRawDataBBox().getDimensions(), amp.getBBox().getDimensions()))
-            if not warned:
-                logger.warn("amp.getRawBBox() != data.getBBox(); patching. (%s v. %s)",
-                            amp.getRawBBox(), ampExp.getBBox())
-                warned = True
+    def logCmd(s, *args):
+        nonlocal warned
+        if warned:
+            logger.debug("{}: {}".format(dataId, s), *args)
+        else:
+            logger.warn("{}: {}".format(dataId, s), *args)
+            warned = True
 
-            w, h = ampExp.getBBox().getDimensions()
-            ow, oh = amp.getRawBBox().getDimensions()  # "old" (cameraGeom) dimensions
-            #
-            # We could trust the BIASSEC keyword, or we can just assume that
-            # they've changed the number of overscan pixels (serial and/or
-            # parallel).  As Jim Chiang points out, the latter is safer
-            #
-            bbox = amp.getRawHorizontalOverscanBBox()
-            hOverscanBBox = geom.BoxI(bbox.getBegin(),
-                                      geom.ExtentI(w - bbox.getBeginX(), bbox.getHeight()))
-            bbox = amp.getRawVerticalOverscanBBox()
-            vOverscanBBox = geom.BoxI(bbox.getBegin(),
-                                      geom.ExtentI(bbox.getWidth(), h - bbox.getBeginY()))
+    import pdb; pdb.set_trace()
 
-            amp.setRawBBox(ampExp.getBBox())
-            amp.setRawHorizontalOverscanBBox(hOverscanBBox)
-            amp.setRawVerticalOverscanBBox(vOverscanBBox)
-            #
-            # This gets all the geometry right for the amplifier, but the size
-            # of the untrimmed image will be wrong and we'll put the amp
-            # sections in the wrong places, i.e.
-            #   amp.getRawXYOffset()
-            # will be wrong.  So we need to recalculate the offsets.
-            #
-            xRawExtent, yRawExtent = amp.getRawBBox().getDimensions()
-
-            x0, y0 = amp.getRawXYOffset()
-            ix, iy = x0//ow, y0/oh
-            x0, y0 = ix*xRawExtent, iy*yRawExtent
-            amp.setRawXYOffset(geom.ExtentI(ix*xRawExtent, iy*yRawExtent))
-        #
-        # Check the "IRAF" keywords, but don't abort if they're wrong
-        #
-        # Only warn about the first amp, use debug for the others
-        #
-        detsec = bboxFromIraf(ampMd["DETSEC"]) if "DETSEC" in ampMd else None
-        datasec = bboxFromIraf(ampMd["DATASEC"]) if "DATASEC" in ampMd else None
-        biassec = bboxFromIraf(ampMd["BIASSEC"]) if "BIASSEC" in ampMd else None
-
-        logCmd = logger.warn if i == 0 else logger.debug
-        if detsec and amp.getBBox() != detsec:
-            logCmd("DETSEC doesn't match for %s (%s != %s)", dataId, amp.getBBox(), detsec)
-        if datasec and amp.getRawDataBBox() != datasec:
-            logCmd("DATASEC doesn't match for %s (%s != %s)", dataId, amp.getRawDataBBox(), detsec)
-        if biassec and amp.getRawHorizontalOverscanBBox() != biassec:
-            logCmd("BIASSEC doesn't match for %s (%s != %s)",
-                   dataId, amp.getRawHorizontalOverscanBBox(), detsec)
-
-    ampDict = {}
     for amp, ampExp in zip(ccd, ampExps):
-        ampDict[amp.getName()] = ampExp
+        fixAmpGeometry(amp, bbox=ampExp.getBBox(), metadata=ampExp.getMetadata(), logCmd=logCmd)
 
-    exposure = assembleTask.assembleCcd(ampDict)
+    exposure = assembleUntrimmedCcd(ccd, ampExps)
+
+    import pdb; pdb.set_trace()
 
     md = componentInfo['raw_hdu'].obj
     exposure.setMetadata(md)
-    visitInfo = LsstCamMakeRawVisitInfo(logger)(md)
-    exposure.getInfo().setVisitInfo(visitInfo)
 
-    boresight = visitInfo.getBoresightRaDec()
-    rotangle = visitInfo.getBoresightRotAngle()
+    import pdb; pdb.set_trace()
 
-    if boresight.isFinite():
-        exposure.setWcs(getWcsFromDetector(exposure.getDetector(), boresight,
-                                           90*geom.degrees - rotangle))
-    else:
-        # Should only warn for science observations but VisitInfo does not know
+    if not attachRawWcsFromBoresight(exposure):
         logger.warn("Unable to set WCS for %s from header as RA/Dec/Angle are unavailable" %
                     (dataId,))
 
     return exposure
-
-
-#
-# This code will be replaced by functionality in afw;
-# DM-14932 (done), DM-14980
-#
-
-
-def getWcsFromDetector(detector, boresight, rotation=0*geom.degrees, flipX=False):
-    """Given a detector and (boresight, rotation), return that detector's WCS
-
-    Parameters
-    ----------
-    camera : `lsst.afw.cameraGeom.Camera`
-        The camera containing the detector.
-    detector : `lsst.afw.cameraGeom.Detector`
-        A detector in a camera.
-    boresight : `lsst.afw.geom.SpherePoint`
-       The boresight of the observation.
-    rotation : `lsst.afw.geom.Angle`, optional
-        The rotation angle of the camera.
-        The rotation is "rotskypos", the angle of sky relative to camera
-        coordinates (from North over East).
-    flipX : `bool`, optional
-        Flip the X axis?
-
-    Returns
-    -------
-    wcs : `lsst::afw::geom::SkyWcs`
-        The calculated WCS.
-    """
-    trans = detector.getTransform(detector.makeCameraSys(cameraGeom.PIXELS),
-                                  detector.makeCameraSys(cameraGeom.FIELD_ANGLE))
-
-    wcs = afwGeom.makeSkyWcs(trans, rotation, flipX, boresight)
-
-    return wcs
 
 
 class LsstCamMapper(CameraMapper):
