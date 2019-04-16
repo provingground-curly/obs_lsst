@@ -37,6 +37,10 @@ exposures:
     template: postISRCCD/%(visit)08d-%(filter)s/%(raftName)s/postISRCCD_%(visit)08d-%(filter)s-%(raftName)s-%(detectorName)s-det%(detector)03d.fits
   calexp:
     template: calexp/%(visit)08d-%(filter)s/%(raftName)s/calexp_%(visit)08d-%(filter)s-%(raftName)s-%(detectorName)s-det%(detector)03d.fits
+  calexp_camera:
+    template: calexp_camera/%(visit)08d-%(filter)s/%(raftName)s/calexp_camera_%(visit)08d-%(filter)s-%(raftName)s-%(detectorName)s-det%(detector)03d.fits
+  skyCorr:
+    template: skyCorr/%(visit)08d-%(filter)s/%(raftName)s/skyCorr_%(visit)08d-%(filter)s-%(raftName)s-%(detectorName)s-det%(detector)03d.fits
   icExp:
     template: icExp/%(visit)08d-%(filter)s/%(raftName)s/icExp_%(visit)08d-%(filter)s-%(raftName)s-%(detectorName)s-det%(detector)03d.fits
   wcs:
@@ -179,9 +183,11 @@ calibrations:
     level: Ccd
     tables: sky
     columns:
-    - ccd
+    - dateObs
     - filter
-    - taiObs
+    - raftName
+    - detectorName
+    obsTimeName: dateObs
     reference: raw_visit
     refCols:
     - visit
